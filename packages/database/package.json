@@ -1,0 +1,39 @@
+{
+  "name": "@repo/database",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./better-sqlite3": "./src/drivers/better-sqlite3.ts"
+  },
+  "scripts": {
+    "db:generate": "drizzle-kit generate && tsx scripts/postprocess-migration.ts && tsx scripts/embed-migrations.ts",
+    "db:generate:custom": "drizzle-kit generate --custom && tsx scripts/embed-migrations.ts",
+    "db:embed": "tsx scripts/embed-migrations.ts",
+    "db:check": "drizzle-kit check && tsx scripts/embed-migrations.ts --check",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:triggers": "tsx scripts/write-trigger-migration.ts && tsx scripts/embed-migrations.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.3",
+    "ulid": "^3.0.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
+    "better-sqlite3": "^13.0.3",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=12"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  }
+}

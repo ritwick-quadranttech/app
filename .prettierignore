@@ -1,0 +1,8 @@
+pnpm-lock.yaml
+dist/
+coverage/
+.turbo/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+packages/database/src/migrations/generated.ts
+packages/database/migrations/
