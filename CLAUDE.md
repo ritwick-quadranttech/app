@@ -147,5 +147,4 @@ DB bridge / hooks only.
   from scratch is acceptable.
 - ADR-002's table list predates later additions (`contra_vouchers`, `expenses`,
   `journal_vouchers`, `gst_transactions`); the schema in `src/schema/` is authoritative.
-- `docs/roadmap.md` lists Phase 3 as "Not started" although `packages/accounting` is
-  implemented; update the roadmap when finishing a phase.
+- Phase 3 (`packages/accounting`) is implemented and marked Done in `docs/roadmap.md`.

@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { check, index, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
-import { SALES_PAYMENT_TYPES } from './enums';
+import { SALES_PAYMENT_METHODS, SALES_PAYMENT_STATUSES, SALES_PAYMENT_TYPES } from './enums';
 import { bool, inList, isIsoDate, isoDate } from './columns';
 import { accounts } from './masters';
 import {
@@ -17,6 +17,12 @@ export const salesInvoices = sqliteTable(
   {
     ...tradeDocumentColumns(),
     paymentType: text('payment_type', { enum: SALES_PAYMENT_TYPES }).notNull().default('CREDIT'),
+    paymentMethod: text('payment_method', { enum: SALES_PAYMENT_METHODS })
+      .notNull()
+      .default('CREDIT'),
+    paymentStatus: text('payment_status', { enum: SALES_PAYMENT_STATUSES })
+      .notNull()
+      .default('UNPAID'),
     /** Cash sales only: the cash or bank ledger debited instead of the party. */
     cashBankAccountId: text('cash_bank_account_id').references(() => accounts.id),
   },
@@ -24,6 +30,8 @@ export const salesInvoices = sqliteTable(
     ...tradeDocumentConstraints('sales_invoices', t),
     index('sales_invoices_cash_bank_account_id_idx').on(t.cashBankAccountId),
     check('sales_invoices_payment_type', inList(t.paymentType, SALES_PAYMENT_TYPES)),
+    check('sales_invoices_payment_method', inList(t.paymentMethod, SALES_PAYMENT_METHODS)),
+    check('sales_invoices_payment_status', inList(t.paymentStatus, SALES_PAYMENT_STATUSES)),
     check(
       'sales_invoices_cash_account',
       sql`(${t.paymentType} = 'CASH') = (${t.cashBankAccountId} IS NOT NULL)`,

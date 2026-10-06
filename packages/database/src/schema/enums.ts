@@ -113,6 +113,21 @@ export type PaymentMode = (typeof PAYMENT_MODES)[number];
 export const SALES_PAYMENT_TYPES = ['CREDIT', 'CASH'] as const;
 export type SalesPaymentType = (typeof SALES_PAYMENT_TYPES)[number];
 
+export const SALES_PAYMENT_METHODS = [
+  'CASH',
+  'ONLINE',
+  'UPI',
+  'BANK_TRANSFER',
+  'CARD',
+  'CHEQUE',
+  'CREDIT',
+  'OTHER',
+] as const;
+export type SalesPaymentMethod = (typeof SALES_PAYMENT_METHODS)[number];
+
+export const SALES_PAYMENT_STATUSES = ['PAID', 'UNPAID'] as const;
+export type SalesPaymentStatus = (typeof SALES_PAYMENT_STATUSES)[number];
+
 export const NEGATIVE_STOCK_POLICIES = ['ALLOW', 'WARN', 'BLOCK'] as const;
 export type NegativeStockPolicy = (typeof NEGATIVE_STOCK_POLICIES)[number];
 

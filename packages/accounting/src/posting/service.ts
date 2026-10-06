@@ -7,6 +7,7 @@ import {
   type Db,
   expenseItems,
   expenses,
+  einvoices,
   gstTransactions,
   journalEntries,
   journalVoucherLines,
@@ -63,7 +64,13 @@ import {
   type TradeDocument,
   type TradeLine,
 } from '../rules/types';
-import { postContra, postExpense, postJournalVoucher, postPayment, postReceipt } from '../rules/vouchers';
+import {
+  postContra,
+  postExpense,
+  postJournalVoucher,
+  postPayment,
+  postReceipt,
+} from '../rules/vouchers';
 import type {
   CashVoucherInput,
   ContraInput,
@@ -140,6 +147,17 @@ export class PostingService {
 
   async postSalesInvoice(input: SalesInvoiceInput): Promise<PostedDocument> {
     const p = await this.#prepareTrade('SALES_INVOICE', input);
+    const paymentMethod = input.paymentMethod ?? (input.cashBankAccountId ? 'CASH' : 'CREDIT');
+    const paymentStatus = input.paymentStatus ?? (input.cashBankAccountId ? 'PAID' : 'UNPAID');
+    if (paymentMethod === 'CREDIT' && paymentStatus === 'PAID') {
+      throw new DocumentValidationError('A credit invoice cannot be marked paid.');
+    }
+    if (paymentStatus === 'PAID' && input.cashBankAccountId === undefined) {
+      throw new DocumentValidationError('Choose a cash or bank account for a paid invoice.');
+    }
+    if (paymentStatus === 'UNPAID' && input.cashBankAccountId !== undefined) {
+      throw new DocumentValidationError('An unpaid invoice cannot debit a cash or bank account.');
+    }
     if (input.cashBankAccountId !== undefined) {
       await this.#cashOrBank(p.company.id, input.cashBankAccountId);
     }
@@ -150,12 +168,23 @@ export class PostingService {
     const header = {
       ...p.header,
       paymentType: input.cashBankAccountId === undefined ? ('CREDIT' as const) : ('CASH' as const),
+      paymentMethod,
+      paymentStatus,
       cashBankAccountId: orNull(input.cashBankAccountId),
     };
     await this.tx.insert(salesInvoices).values(header);
     const items = p.items((id) => ({ invoiceId: id }));
     await this.tx.insert(salesInvoiceItems).values(items);
-    return this.#record(p.ctx, result, { header, items });
+    const posted = await this.#record(p.ctx, result, { header, items });
+    await this.tx.insert(einvoices).values({
+      companyId: p.company.id,
+      financialYear: posted.financialYear,
+      sourceDocId: posted.id,
+      sourceDocType: 'SALES_INVOICE',
+      status: p.company.einvoiceEnabled && p.doc.partyGstin ? 'PENDING' : 'NOT_REQUIRED',
+      createdBy: this.actor.userId,
+    });
+    return posted;
   }
 
   async postSalesReturn(input: SalesReturnInput): Promise<PostedDocument> {
@@ -389,7 +418,8 @@ export class PostingService {
     );
     if (!row) throw new DocumentNotFoundError(`${docType} ${docId} not found.`);
     const [companyId, date, status] = row;
-    if (status === 'CANCELLED') throw new AlreadyCancelledError(`${docType} ${docId} is already cancelled.`);
+    if (status === 'CANCELLED')
+      throw new AlreadyCancelledError(`${docType} ${docId} is already cancelled.`);
 
     const company = await this.#company(companyId);
     this.#assertPeriodOpen(company, date);
@@ -400,6 +430,12 @@ export class PostingService {
           cancelled_at = ${now}, cancelled_by = ${this.actor.userId}, updated_at = ${now}
           WHERE id = ${docId}`,
     );
+    if (docType === 'SALES_INVOICE') {
+      await this.tx
+        .update(einvoices)
+        .set({ status: 'CANCELLED', updatedAt: new Date(now) })
+        .where(and(eq(einvoices.sourceDocType, 'SALES_INVOICE'), eq(einvoices.sourceDocId, docId)));
+    }
 
     // Journal entries → mirror-image entries.
     const reversalJournalEntryIds: string[] = [];
@@ -433,7 +469,13 @@ export class PostingService {
       reversalJournalEntryIds.push(
         await this.#insertJournal(
           { ...reversal, narration: `Cancelled: ${reason.trim()}` },
-          { companyId, financialYear: entry.financialYear, docType, docId, reversesEntryId: entry.id },
+          {
+            companyId,
+            financialYear: entry.financialYear,
+            docType,
+            docId,
+            reversesEntryId: entry.id,
+          },
         ),
       );
     }
@@ -496,18 +538,28 @@ export class PostingService {
       );
     }
 
-    await this.#audit(companyId, 'CANCEL', DOCUMENT_TABLES[docType], docId, { status: 'POSTED' }, {
-      status: 'CANCELLED',
-      cancelReason: reason.trim(),
-      reversalJournalEntryIds,
-    });
+    await this.#audit(
+      companyId,
+      'CANCEL',
+      DOCUMENT_TABLES[docType],
+      docId,
+      { status: 'POSTED' },
+      {
+        status: 'CANCELLED',
+        cancelReason: reason.trim(),
+        reversalJournalEntryIds,
+      },
+    );
 
     return { docType, id: docId, reversalJournalEntryIds, warnings };
   }
 
   // ================= shared steps =================
 
-  async #open(docType: SourceDocType, input: { companyId: string; seriesId: string; date: string; notes?: string }) {
+  async #open(
+    docType: SourceDocType,
+    input: { companyId: string; seriesId: string; date: string; notes?: string },
+  ) {
     assertIsoDate(input.date);
     const company = await this.#company(input.companyId);
     this.#assertPeriodOpen(company, input.date);
@@ -521,7 +573,9 @@ export class PostingService {
       throw new DocumentValidationError(`Number series ${input.seriesId} not found.`);
     }
     if (series.docType !== docType) {
-      throw new DocumentValidationError(`Series '${series.name}' is for ${series.docType}, not ${docType}.`);
+      throw new DocumentValidationError(
+        `Series '${series.name}' is for ${series.docType}, not ${docType}.`,
+      );
     }
     if (series.financialYear !== financialYear) {
       throw new DocumentValidationError(
@@ -554,7 +608,10 @@ export class PostingService {
     if (input.dueDate !== undefined) assertIsoDate(input.dueDate, 'due date');
     const party = await this.#party(o.company.id, input.partyId);
     const accounts = await this.#systemAccounts(o.company.id);
-    const productMap = await this.#products(o.company.id, input.lines.map((l) => l.productId));
+    const productMap = await this.#products(
+      o.company.id,
+      input.lines.map((l) => l.productId),
+    );
 
     const lines: TradeLine[] = input.lines.map((l) => {
       const product = productMap.get(l.productId);
@@ -653,7 +710,10 @@ export class PostingService {
     };
   }
 
-  async #postCashVoucher(docType: 'RECEIPT' | 'PAYMENT', input: CashVoucherInput): Promise<PostedDocument> {
+  async #postCashVoucher(
+    docType: 'RECEIPT' | 'PAYMENT',
+    input: CashVoucherInput,
+  ): Promise<PostedDocument> {
     if ((input.partyId === undefined) === (input.counterAccountId === undefined)) {
       throw new DocumentValidationError('Give exactly one of partyId or counterAccountId.');
     }
@@ -695,7 +755,10 @@ export class PostingService {
   ): Promise<PostedDocument> {
     if (!input.reason.trim()) throw new DocumentValidationError('A reason is required.');
     const o = await this.#open('STOCK_ADJUSTMENT', input);
-    const productMap = await this.#products(o.company.id, input.lines.map((l) => l.productId));
+    const productMap = await this.#products(
+      o.company.id,
+      input.lines.map((l) => l.productId),
+    );
     const lines = input.lines.map((l) => {
       const product = productMap.get(l.productId);
       if (!product) throw new DocumentValidationError(`Product ${l.productId} not found.`);
@@ -799,7 +862,10 @@ export class PostingService {
     },
   ): Promise<string> {
     assertBalanced(journal);
-    await this.#assertLedgers(link.companyId, journal.lines.map((l) => l.accountId));
+    await this.#assertLedgers(
+      link.companyId,
+      journal.lines.map((l) => l.accountId),
+    );
     const id = newId();
     await this.tx.insert(journalEntries).values({
       id,
@@ -850,7 +916,10 @@ export class PostingService {
           })
           .from(stockMovements)
           .where(
-            and(eq(stockMovements.companyId, company.id), inArray(stockMovements.productId, outward)),
+            and(
+              eq(stockMovements.companyId, company.id),
+              inArray(stockMovements.productId, outward),
+            ),
           )
           .groupBy(stockMovements.productId)
       ).map((r) => [r.productId, r.qty]),
@@ -935,7 +1004,11 @@ export class PostingService {
       .select({ code: accounts.systemCode, id: accounts.id })
       .from(accounts)
       .where(
-        and(eq(accounts.companyId, companyId), isNotNull(accounts.systemCode), isNull(accounts.deletedAt)),
+        and(
+          eq(accounts.companyId, companyId),
+          isNotNull(accounts.systemCode),
+          isNull(accounts.deletedAt),
+        ),
       );
     const byCode = new Map(rows.map((r) => [r.code, r.id]));
     const missing = SYSTEM_ACCOUNT_CODES.filter((c) => !byCode.has(c));
@@ -944,7 +1017,9 @@ export class PostingService {
         `Chart of accounts is missing ${missing.join(', ')}; run seedCompanyDefaults().`,
       );
     }
-    return Object.fromEntries(SYSTEM_ACCOUNT_CODES.map((c) => [c, byCode.get(c)])) as SystemAccounts;
+    return Object.fromEntries(
+      SYSTEM_ACCOUNT_CODES.map((c) => [c, byCode.get(c)]),
+    ) as SystemAccounts;
   }
 
   /** Every posted account must be an active, non-group ledger of this company. */
@@ -1002,7 +1077,9 @@ export class PostingService {
     const [party] = await this.tx
       .select()
       .from(parties)
-      .where(and(eq(parties.id, partyId), eq(parties.companyId, companyId), isNull(parties.deletedAt)));
+      .where(
+        and(eq(parties.id, partyId), eq(parties.companyId, companyId), isNull(parties.deletedAt)),
+      );
     if (!party) throw new DocumentValidationError(`Party ${partyId} not found.`);
     return party;
   }
@@ -1022,12 +1099,19 @@ export class PostingService {
     return new Map(rows.map((r) => [r.id, r]));
   }
 
-  async #assertOriginal(table: string, id: string, companyId: string, partyId: string): Promise<void> {
+  async #assertOriginal(
+    table: string,
+    id: string,
+    companyId: string,
+    partyId: string,
+  ): Promise<void> {
     const [row] = await this.tx.values<[string, string, string]>(
       sql`SELECT company_id, party_id, status FROM ${sql.identifier(table)} WHERE id = ${id}`,
     );
-    if (!row || row[0] !== companyId) throw new DocumentValidationError(`Original invoice ${id} not found.`);
-    if (row[1] !== partyId) throw new DocumentValidationError('Original invoice is for a different party.');
+    if (!row || row[0] !== companyId)
+      throw new DocumentValidationError(`Original invoice ${id} not found.`);
+    if (row[1] !== partyId)
+      throw new DocumentValidationError('Original invoice is for a different party.');
     if (row[2] !== 'POSTED') throw new DocumentValidationError('Original invoice is cancelled.');
   }
 }

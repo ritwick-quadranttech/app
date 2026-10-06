@@ -32,6 +32,7 @@ export const companies = sqliteTable(
     /** Month (1–12) the financial year starts in. India: April. */
     fyStartMonth: integer('fy_start_month').notNull().default(4),
     booksBeginDate: isoDate('books_begin_date').notNull(),
+    einvoiceEnabled: bool('einvoice_enabled').notNull().default(false),
     negativeStockPolicy: text('negative_stock_policy', { enum: NEGATIVE_STOCK_POLICIES })
       .notNull()
       .default('WARN'),

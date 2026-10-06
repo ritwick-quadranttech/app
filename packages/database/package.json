@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./migrations/generated": "./src/migrations/generated.ts",
     "./better-sqlite3": "./src/drivers/better-sqlite3.ts"
   },
   "scripts": {

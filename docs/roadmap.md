@@ -5,8 +5,8 @@
 |     0 | Monorepo scaffold                         | Done                                |
 |     1 | GST engine (`packages/gst-engine`)        | Not started                         |
 |     2 | Local schema (`packages/database`)        | Done — schema provisional (ADR-002) |
-|     3 | Accounting engine (`packages/accounting`) | Not started                         |
-|     4 | Tauri DB bridge                           | Not started                         |
+|     3 | Accounting engine (`packages/accounting`) | Done                                |
+|     4 | Tauri DB bridge                           | Done                                |
 |     5 | Masters                                   | Not started                         |
 |     6 | Sales                                     | Not started                         |
 |     7 | Purchase, returns, payments, inventory    | Not started                         |

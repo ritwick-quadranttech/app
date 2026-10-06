@@ -1,4 +1,4 @@
-import type { PaymentMode } from '@repo/database';
+import type { PaymentMode, SalesPaymentMethod, SalesPaymentStatus } from '@repo/database';
 
 /*
  * What callers (the UI via the Tauri bridge, imports, tests) hand to PostingService. Amounts are
@@ -50,6 +50,8 @@ export interface TradeDocumentInput extends NumberedInput {
 export interface SalesInvoiceInput extends TradeDocumentInput {
   /** Present → cash sale settled into this cash/bank ledger. Absent → credit sale. */
   readonly cashBankAccountId?: string;
+  readonly paymentMethod?: SalesPaymentMethod;
+  readonly paymentStatus?: SalesPaymentStatus;
 }
 
 export interface SalesReturnInput extends TradeDocumentInput {

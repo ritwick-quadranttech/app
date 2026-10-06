@@ -1,4 +1,10 @@
-import { companies, journalEntries, salesInvoices, stockMovements } from '@repo/database';
+import {
+  companies,
+  einvoices,
+  journalEntries,
+  salesInvoices,
+  stockMovements,
+} from '@repo/database';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import {
@@ -41,7 +47,11 @@ async function stockIn(w: World, qty: number) {
   );
 }
 
-const sale = (w: World, qty: number, over: Partial<Parameters<PostingService['postSalesInvoice']>[0]> = {}) =>
+const sale = (
+  w: World,
+  qty: number,
+  over: Partial<Parameters<PostingService['postSalesInvoice']>[0]> = {},
+) =>
   w.post((p) =>
     p.postSalesInvoice({
       companyId: w.companyId,
@@ -71,8 +81,22 @@ describe('PostingService', () => {
       audit_logs: 1,
     });
     const [inv] = await w.db.select().from(salesInvoices);
-    expect(inv).toMatchObject({ taxableTotalPaise: 6_500, grandTotalPaise: 7_670, paymentType: 'CREDIT' });
-    expect((await accountBalance(w.db, { companyId: w.companyId, accountId: w.customerAccountId, asOf: '2026-05-31' })).balancePaise).toBe(7_670);
+    expect(inv).toMatchObject({
+      taxableTotalPaise: 6_500,
+      grandTotalPaise: 7_670,
+      paymentType: 'CREDIT',
+    });
+    expect(
+      (
+        await accountBalance(w.db, {
+          companyId: w.companyId,
+          accountId: w.customerAccountId,
+          asOf: '2026-05-31',
+        })
+      ).balancePaise,
+    ).toBe(7_670);
+    const [eInvoice] = await w.db.select().from(einvoices);
+    expect(eInvoice).toMatchObject({ status: 'NOT_REQUIRED', irn: null, signedQr: null });
   });
 
   it('cash sale debits the chosen cash/bank ledger', async () => {
@@ -81,8 +105,55 @@ describe('PostingService', () => {
 
     await sale(w, 1, { cashBankAccountId: cash });
 
-    expect((await accountBalance(w.db, { companyId: w.companyId, accountId: cash, asOf: '2026-05-31' })).balancePaise).toBe(2_950);
-    expect((await accountBalance(w.db, { companyId: w.companyId, accountId: w.customerAccountId, asOf: '2026-05-31' })).balancePaise).toBe(0);
+    expect(
+      (await accountBalance(w.db, { companyId: w.companyId, accountId: cash, asOf: '2026-05-31' }))
+        .balancePaise,
+    ).toBe(2_950);
+    expect(
+      (
+        await accountBalance(w.db, {
+          companyId: w.companyId,
+          accountId: w.customerAccountId,
+          asOf: '2026-05-31',
+        })
+      ).balancePaise,
+    ).toBe(0);
+  });
+
+  it('records pending e-invoice status for enabled B2B sales without inventing an IRN', async () => {
+    const w = await world();
+    await w.db
+      .update(companies)
+      .set({ einvoiceEnabled: true })
+      .where(eq(companies.id, w.companyId));
+
+    const posted = await sale(w, 1);
+    const [eInvoice] = await w.db
+      .select()
+      .from(einvoices)
+      .where(eq(einvoices.sourceDocId, posted.id));
+
+    expect(eInvoice).toMatchObject({
+      status: 'PENDING',
+      sourceDocType: 'SALES_INVOICE',
+      irn: null,
+      signedQr: null,
+      responseJson: null,
+    });
+  });
+
+  it('persists payment method and status independently from the cash/credit posting account', async () => {
+    const w = await world();
+
+    await sale(w, 1, { paymentMethod: 'ONLINE', paymentStatus: 'UNPAID' });
+
+    const [invoice] = await w.db.select().from(salesInvoices);
+    expect(invoice).toMatchObject({
+      paymentMethod: 'ONLINE',
+      paymentStatus: 'UNPAID',
+      paymentType: 'CREDIT',
+      cashBankAccountId: null,
+    });
   });
 
   it('a forced failure mid-transaction leaves zero rows behind', async () => {
@@ -113,7 +184,9 @@ describe('PostingService', () => {
     const before = snapshotCounts(w);
     const bankGroup = await w.account('BANK');
 
-    await expect(sale(w, 1, { cashBankAccountId: bankGroup })).rejects.toBeInstanceOf(InvalidAccountError);
+    await expect(sale(w, 1, { cashBankAccountId: bankGroup })).rejects.toBeInstanceOf(
+      InvalidAccountError,
+    );
 
     expect(snapshotCounts(w)).toEqual(before);
   });
@@ -129,17 +202,42 @@ describe('PostingService', () => {
 
     const cancelled = await w.post((p) => p.cancel('SALES_INVOICE', posted.id, 'Wrong customer'));
 
-    expect(await trialBalance(w.db, { companyId: w.companyId, asOf: '2026-12-31' })).toEqual(before);
+    expect(await trialBalance(w.db, { companyId: w.companyId, asOf: '2026-12-31' })).toEqual(
+      before,
+    );
     expect(cancelled.reversalJournalEntryIds).toHaveLength(1);
-    const [reversal] = await w.db.select().from(journalEntries).where(eq(journalEntries.id, cancelled.reversalJournalEntryIds[0]!));
-    expect(reversal).toMatchObject({ reversesEntryId: posted.journalEntryId, sourceDocId: posted.id });
-    const stock = await w.db.select().from(stockMovements).where(eq(stockMovements.sourceDocId, posted.id));
+    const [reversal] = await w.db
+      .select()
+      .from(journalEntries)
+      .where(eq(journalEntries.id, cancelled.reversalJournalEntryIds[0]!));
+    expect(reversal).toMatchObject({
+      reversesEntryId: posted.journalEntryId,
+      sourceDocId: posted.id,
+    });
+    const stock = await w.db
+      .select()
+      .from(stockMovements)
+      .where(eq(stockMovements.sourceDocId, posted.id));
     expect(stock.map((m) => m.qtyX1000).sort()).toEqual([-4000, 4000]);
-    expect(stock.find((m) => m.qtyX1000 > 0)?.reversesMovementId).toBe(stock.find((m) => m.qtyX1000 < 0)?.id);
+    expect(stock.find((m) => m.qtyX1000 > 0)?.reversesMovementId).toBe(
+      stock.find((m) => m.qtyX1000 < 0)?.id,
+    );
     const [inv] = await w.db.select().from(salesInvoices);
-    expect(inv).toMatchObject({ status: 'CANCELLED', cancelReason: 'Wrong customer', cancelledBy: ACTOR.userId });
+    expect(inv).toMatchObject({
+      status: 'CANCELLED',
+      cancelReason: 'Wrong customer',
+      cancelledBy: ACTOR.userId,
+    });
+    const [eInvoice] = await w.db
+      .select()
+      .from(einvoices)
+      .where(eq(einvoices.sourceDocId, posted.id));
+    expect(eInvoice?.status).toBe('CANCELLED');
     // Nothing was deleted: the original entry is still there alongside its reversal.
-    const original = await w.db.select().from(journalEntries).where(eq(journalEntries.id, posted.journalEntryId!));
+    const original = await w.db
+      .select()
+      .from(journalEntries)
+      .where(eq(journalEntries.id, posted.journalEntryId!));
     expect(original).toHaveLength(1);
     expect(w.count('sales_invoices')).toBe(1);
   });
@@ -149,7 +247,9 @@ describe('PostingService', () => {
     const posted = await sale(w, 1);
     await w.post((p) => p.cancel('SALES_INVOICE', posted.id, 'dup'));
 
-    await expect(w.post((p) => p.cancel('SALES_INVOICE', posted.id, 'again'))).rejects.toBeInstanceOf(AlreadyCancelledError);
+    await expect(
+      w.post((p) => p.cancel('SALES_INVOICE', posted.id, 'again')),
+    ).rejects.toBeInstanceOf(AlreadyCancelledError);
   });
 
   it('RCM purchase posts both input tax and the RCM liability', async () => {
@@ -170,11 +270,25 @@ describe('PostingService', () => {
     );
 
     const bal = async (code: Parameters<World['account']>[0]) =>
-      (await accountBalance(w.db, { companyId: w.companyId, accountId: await w.account(code), asOf: '2026-05-31' })).balancePaise;
+      (
+        await accountBalance(w.db, {
+          companyId: w.companyId,
+          accountId: await w.account(code),
+          asOf: '2026-05-31',
+        })
+      ).balancePaise;
     expect(await bal('INPUT_IGST')).toBe(9_000);
     expect(await bal('RCM_PAYABLE')).toBe(-9_000);
     expect(await bal('PURCHASE')).toBe(50_000);
-    expect((await accountBalance(w.db, { companyId: w.companyId, accountId: w.supplierAccountId, asOf: '2026-05-31' })).balancePaise).toBe(-50_000);
+    expect(
+      (
+        await accountBalance(w.db, {
+          companyId: w.companyId,
+          accountId: w.supplierAccountId,
+          asOf: '2026-05-31',
+        })
+      ).balancePaise,
+    ).toBe(-50_000);
   });
 
   it('receipt / payment modes must match the ledger', async () => {
@@ -216,7 +330,12 @@ describe('negative stock policy', () => {
 
     expect(err).toBeInstanceOf(NegativeStockError);
     expect((err as NegativeStockError).shortfalls).toEqual([
-      { productId: w.widgetId, availableQtyX1000: 2000, requestedQtyX1000: 5000, resultingQtyX1000: -3000 },
+      {
+        productId: w.widgetId,
+        availableQtyX1000: 2000,
+        requestedQtyX1000: 5000,
+        resultingQtyX1000: -3000,
+      },
     ]);
     expect(snapshotCounts(w)).toEqual(before);
   });
@@ -230,7 +349,14 @@ describe('negative stock policy', () => {
     expect(posted.warnings).toEqual([
       {
         code: 'NEGATIVE_STOCK',
-        shortfalls: [{ productId: w.widgetId, availableQtyX1000: 2000, requestedQtyX1000: 5000, resultingQtyX1000: -3000 }],
+        shortfalls: [
+          {
+            productId: w.widgetId,
+            availableQtyX1000: 2000,
+            requestedQtyX1000: 5000,
+            resultingQtyX1000: -3000,
+          },
+        ],
       },
     ]);
     expect(w.count('sales_invoices')).toBe(1);
@@ -256,7 +382,9 @@ describe('negative stock policy', () => {
     const purchase = await stockIn(w, 5);
     await sale(w, 4);
 
-    await expect(w.post((p) => p.cancel('PURCHASE_INVOICE', purchase.id, 'oops'))).rejects.toBeInstanceOf(NegativeStockError);
+    await expect(
+      w.post((p) => p.cancel('PURCHASE_INVOICE', purchase.id, 'oops')),
+    ).rejects.toBeInstanceOf(NegativeStockError);
   });
 });
 
@@ -264,22 +392,31 @@ describe('period lock', () => {
   it('rejects posting and cancelling on or before the lock date', async () => {
     const w = await world();
     const posted = await sale(w, 1);
-    await w.client.transaction((tx) => updatePostingSettings(tx, ACTOR, w.companyId, { lockedUntil: '2026-05-10' }));
+    await w.client.transaction((tx) =>
+      updatePostingSettings(tx, ACTOR, w.companyId, { lockedUntil: '2026-05-10' }),
+    );
 
     await expect(sale(w, 1)).rejects.toBeInstanceOf(PeriodLockedError);
-    await expect(w.post((p) => p.cancel('SALES_INVOICE', posted.id, 'late'))).rejects.toBeInstanceOf(PeriodLockedError);
+    await expect(
+      w.post((p) => p.cancel('SALES_INVOICE', posted.id, 'late')),
+    ).rejects.toBeInstanceOf(PeriodLockedError);
     await expect(sale(w, 1, { date: '2026-05-11' })).resolves.toMatchObject({ docNo: 2 });
   });
 
   it('rejects dates before the books begin', async () => {
     const w = await world();
-    await expect(sale(w, 1, { date: '2026-03-31' })).rejects.toBeInstanceOf(DocumentValidationError);
+    await expect(sale(w, 1, { date: '2026-03-31' })).rejects.toBeInstanceOf(
+      DocumentValidationError,
+    );
   });
 
   it('settings changes are audit-logged', async () => {
     const w = await world();
     await w.client.transaction((tx) =>
-      updatePostingSettings(tx, ACTOR, w.companyId, { lockedUntil: '2026-06-30', negativeStockPolicy: 'BLOCK' }),
+      updatePostingSettings(tx, ACTOR, w.companyId, {
+        lockedUntil: '2026-06-30',
+        negativeStockPolicy: 'BLOCK',
+      }),
     );
     const [c] = await w.db.select().from(companies);
     expect(c).toMatchObject({ lockedUntil: '2026-06-30', negativeStockPolicy: 'BLOCK' });

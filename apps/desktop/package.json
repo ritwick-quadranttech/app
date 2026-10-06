@@ -15,9 +15,19 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@repo/accounting": "workspace:*",
+    "@repo/database": "workspace:*",
+    "@repo/gst-engine": "workspace:*",
+    "@repo/invoice": "workspace:*",
+    "@repo/shared": "workspace:*",
+    "@repo/validation": "workspace:*",
+    "@tanstack/react-table": "^8.21.2",
     "@tauri-apps/api": "^2.12.1",
+    "drizzle-orm": "^0.45.3",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.0",
+    "react-hook-form": "^7.54.2",
+    "ulid": "^3.0.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1",
